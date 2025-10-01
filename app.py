@@ -5,13 +5,22 @@ from PIL import Image
 import json
 import os
 import time
+import openai
 
 # ---------------- Config ----------------
 st.set_page_config(page_title="🌱 Plant Doctor", layout="wide", page_icon="🌿")
 
-MODEL_PATH = "models/plant_disease_model.keras"  # ✅ updated to match training save format
+MODEL_PATH = "models/plant_disease_model.keras"
 CLASS_NAMES_PATH = "models/class_names.json"
 TREATMENTS_PATH = "models/disease_treatments.json"
+
+# ---------------- API Key Management ----------------
+with st.sidebar:
+    st.header("API Configuration")
+    # Use the key from the widget's state directly to ensure it persists across reruns
+    st.text_input("Enter your OpenAI API Key:", type="password", key="api_key_input")
+    if st.session_state.get("api_key_input"):
+        st.success("API Key set successfully!")
 
 # ---------------- Load Model ----------------
 @st.cache_resource
@@ -36,15 +45,15 @@ else:
 def predict_disease(image):
     if model is None:
         return "Model not available", "Please train and save the model first."
-    
-    img = image.resize((128, 128))  # match training size
+
+    img = image.resize((128, 128))
     img_array = np.expand_dims(np.array(img), axis=0)
     img_array = tf.keras.applications.efficientnet.preprocess_input(img_array)
 
     preds = model.predict(img_array)
     pred_class = class_names[np.argmax(preds)]
     pred_treatment = treatments.get(pred_class, "No treatment info available.")
-    
+
     return pred_class, pred_treatment
 
 # ---------------- CSS Styling ----------------
@@ -105,48 +114,64 @@ with tabs[0]:
                 </div>
                 """, unsafe_allow_html=True)
 
-# ---------------- Chatbot Tab ----------------
+# ---------------- Agentic Chatbot Tab ----------------
 with tabs[1]:
-    st.header("Plant Chatbot 💬")
+    st.header("Agentic Plant Chatbot 💬")
 
-    if 'chat_history' not in st.session_state:
+    # Standardized chat history format (list of dicts)
+    if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if 'last_disease' not in st.session_state:
-        st.session_state.last_disease = None
+        st.session_state.last_disease = "None"
 
-    user_msg = st.text_input("Ask your plant question here:")
-    if st.button("Send") and user_msg.strip() != "":
-        # Default/fallback answers
-        fallback = {
-            "watering": "💧 Water the plant 2-3 times a week depending on soil moisture.",
-            "sunlight": "☀️ Most plants need 6-8 hours of sunlight daily.",
-            "fertilizer": "🌱 Use a balanced NPK fertilizer every 3-4 weeks.",
-            "leaf": "🍃 Yellow leaves may indicate overwatering or nutrient deficiency."
-        }
-
-        # If user mentions last detected disease
-        if st.session_state.last_disease and st.session_state.last_disease.lower() in user_msg.lower():
-            answer = treatments.get(st.session_state.last_disease, f"No extra info for {st.session_state.last_disease}.")
-        else:
-            # Simple keyword fallback
-            found = False
-            for key in fallback:
-                if key in user_msg.lower():
-                    answer = fallback[key]
-                    found = True
-                    break
-            if not found:
-                answer = "🤖 I don't have info on that. Try asking about watering, sunlight, fertilizer, or leaves."
-
-        # Save to history
-        st.session_state.chat_history.append((user_msg, answer))
-
-    # Display chat
+    # Display chat messages from history
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-    for chat in st.session_state.chat_history:
-        st.markdown(f'<div class="chat-bubble user">👩‍🌾 {chat[0]}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="chat-bubble bot">🤖 {chat[1]}</div>', unsafe_allow_html=True)
+    for message in st.session_state.chat_history:
+        role = message["role"]
+        content = message["content"]
+        if role == "user":
+            st.markdown(f'<div class="chat-bubble user">👩‍🌾 {content}</div>', unsafe_allow_html=True)
+        elif role == "assistant":
+            st.markdown(f'<div class="chat-bubble bot">🤖 {content}</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # Chat input
+    if not st.session_state.get("api_key_input"):
+        st.warning("Please enter your OpenAI API key in the sidebar to use the chatbot.")
+    else:
+        user_msg = st.text_input("Ask your plant question here:")
+        if st.button("Send") and user_msg.strip() != "":
+            st.session_state.chat_history.append({"role": "user", "content": user_msg})
+
+            try:
+                client = openai.OpenAI(api_key=st.session_state.api_key_input)
+
+                system_prompt = f"""
+                You are a friendly and knowledgeable 'Plant Doctor' AI assistant.
+                Your goal is to help users identify plant diseases and provide clear, concise, and actionable advice.
+                Current context: The last detected disease was '{st.session_state.last_disease}'.
+                If the user asks about this disease, use the known treatment: '{treatments.get(st.session_state.last_disease, "No specific treatment info available.")}'.
+                Keep your answers brief and to the point. Use emojis to make the conversation more engaging.
+                """
+
+                messages_for_api = [{"role": "system", "content": system_prompt}] + st.session_state.chat_history
+
+                # Use the new client and updated method
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages_for_api
+                )
+
+                bot_response = response.choices[0].message.content
+                st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
+
+                # Rerun the app to display the new message immediately
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+                st.session_state.chat_history.append({"role": "assistant", "content": "Sorry, an error occurred. Please check your API key and try again."})
+                st.rerun()
 
 # ---------------- Tips Tab ----------------
 with tabs[2]:
