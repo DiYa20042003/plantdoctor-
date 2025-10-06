@@ -1,51 +1,21 @@
 import streamlit as st
-import tensorflow as tf
-import numpy as np
 from PIL import Image
 import json
 import os
-import time
+from predict import predict_image
+import openai
 
 # ---------------- Config ----------------
 st.set_page_config(page_title="🌱 Plant Doctor", layout="wide", page_icon="🌿")
 
-MODEL_PATH = "models/plant_disease_model.keras"  # ✅ updated to match training save format
-CLASS_NAMES_PATH = "models/class_names.json"
 TREATMENTS_PATH = "models/disease_treatments.json"
 
-# ---------------- Load Model ----------------
-@st.cache_resource
-def load_model():
-    if os.path.exists(MODEL_PATH):
-        return tf.keras.models.load_model(MODEL_PATH)
-    return None
-
-model = load_model()
-
-# ---------------- Load Class Names & Treatments ----------------
-with open(CLASS_NAMES_PATH, "r") as f:
-    class_names = json.load(f)
-
+# ---------------- Load Treatments ----------------
 if os.path.exists(TREATMENTS_PATH):
     with open(TREATMENTS_PATH, "r") as f:
         treatments = json.load(f)
 else:
     treatments = {}
-
-# ---------------- Helper Function ----------------
-def predict_disease(image):
-    if model is None:
-        return "Model not available", "Please train and save the model first."
-    
-    img = image.resize((128, 128))  # match training size
-    img_array = np.expand_dims(np.array(img), axis=0)
-    img_array = tf.keras.applications.efficientnet.preprocess_input(img_array)
-
-    preds = model.predict(img_array)
-    pred_class = class_names[np.argmax(preds)]
-    pred_treatment = treatments.get(pred_class, "No treatment info available.")
-    
-    return pred_class, pred_treatment
 
 # ---------------- CSS Styling ----------------
 st.markdown("""
@@ -76,24 +46,38 @@ body {
 # ---------------- UI Layout ----------------
 st.title("🌱 Plant Disease Detector & Care Assistant")
 
+# ---------------- Sidebar for API Key ----------------
+st.sidebar.title("Settings")
+st.session_state.api_key_input = st.sidebar.text_input("Enter your OpenAI API Key (Optional)", type="password")
+
+
 tabs = st.tabs(["🩺 Detection", "💬 Chatbot", "💡 Tips"])
 
 # ---------------- Detection Tab ----------------
 with tabs[0]:
-    st.header("Upload Leaf Image")
+    st.header("Upload or Capture a Leaf Image")
 
     col1, col2 = st.columns([1, 1.2])
 
     with col1:
         uploaded_file = st.file_uploader("Upload a leaf photo", type=["jpg", "jpeg", "png"])
+        camera_photo = st.camera_input("Or, take a picture with your camera")
+
+        # Determine which input to use
+        image_to_predict = None
         if uploaded_file:
-            image = Image.open(uploaded_file).convert("RGB")
-            st.image(image, caption="📷 Uploaded Leaf", use_column_width=True)
+            image_to_predict = Image.open(uploaded_file).convert("RGB")
+            st.image(image_to_predict, caption="📷 Uploaded Leaf", use_column_width=True)
+        elif camera_photo:
+            image_to_predict = Image.open(camera_photo).convert("RGB")
+            st.image(image_to_predict, caption="📷 Captured Leaf", use_column_width=True)
+
 
     with col2:
-        if uploaded_file and st.button("🔍 Predict Disease"):
+        if image_to_predict and st.button("🔍 Predict Disease"):
             with st.spinner("Analyzing the leaf... 🌿"):
-                disease, treatment = predict_disease(image)
+                disease, confidence = predict_image(image_to_predict)
+                treatment = treatments.get(disease, "No treatment info available.")
 
                 # Save last detected disease for chatbot reference
                 st.session_state.last_disease = disease
@@ -101,6 +85,7 @@ with tabs[0]:
                 st.markdown(f"""
                 <div class="card">
                     <h3>🦠 Detected Disease: <span style="color:#2e7d32">{disease}</span></h3>
+                    <p><b>Confidence:</b> {confidence:.2f}%</p>
                     <p><b>💊 Recommended Treatment:</b> {treatment}</p>
                 </div>
                 """, unsafe_allow_html=True)
@@ -108,6 +93,7 @@ with tabs[0]:
 # ---------------- Chatbot Tab ----------------
 with tabs[1]:
     st.header("Plant Chatbot 💬")
+    st.info("The advanced chatbot uses OpenAI. Enter your API key in the sidebar for AI-powered answers. Without a key, it will use a basic keyword-based system.", icon="💡")
 
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -116,27 +102,43 @@ with tabs[1]:
 
     user_msg = st.text_input("Ask your plant question here:")
     if st.button("Send") and user_msg.strip() != "":
-        # Default/fallback answers
-        fallback = {
-            "watering": "💧 Water the plant 2-3 times a week depending on soil moisture.",
-            "sunlight": "☀️ Most plants need 6-8 hours of sunlight daily.",
-            "fertilizer": "🌱 Use a balanced NPK fertilizer every 3-4 weeks.",
-            "leaf": "🍃 Yellow leaves may indicate overwatering or nutrient deficiency."
-        }
+        # Use OpenAI if API key is provided
+        if st.session_state.api_key_input:
+            openai.api_key = st.session_state.api_key_input
+            try:
+                # Context-aware prompt
+                prompt = f"You are a helpful plant care assistant. A user has a question about their plant. The last detected disease was '{st.session_state.last_disease if st.session_state.last_disease else 'None'}'. The user's question is: '{user_msg}'. Provide a concise and helpful answer."
 
-        # If user mentions last detected disease
-        if st.session_state.last_disease and st.session_state.last_disease.lower() in user_msg.lower():
-            answer = treatments.get(st.session_state.last_disease, f"No extra info for {st.session_state.last_disease}.")
+                response = openai.Completion.create(
+                    engine="text-davinci-003",
+                    prompt=prompt,
+                    max_tokens=150
+                )
+                answer = response.choices[0].text.strip()
+            except Exception as e:
+                answer = f"🤖 Error connecting to OpenAI: {e}"
+        # Fallback to simple keyword-based bot if no API key
         else:
-            # Simple keyword fallback
-            found = False
-            for key in fallback:
-                if key in user_msg.lower():
-                    answer = fallback[key]
-                    found = True
-                    break
-            if not found:
-                answer = "🤖 I don't have info on that. Try asking about watering, sunlight, fertilizer, or leaves."
+            fallback = {
+                "watering": "💧 Water the plant 2-3 times a week depending on soil moisture.",
+                "sunlight": "☀️ Most plants need 6-8 hours of sunlight daily.",
+                "fertilizer": "🌱 Use a balanced NPK fertilizer every 3-4 weeks.",
+                "leaf": "🍃 Yellow leaves may indicate overwatering or nutrient deficiency."
+            }
+
+            # Check if the question relates to the last detected disease
+            if st.session_state.last_disease and st.session_state.last_disease.lower() in user_msg.lower():
+                answer = treatments.get(st.session_state.last_disease, f"I don't have specific treatment info for {st.session_state.last_disease}.")
+            else:
+                # Simple keyword matching
+                found_keyword = False
+                for key, val in fallback.items():
+                    if key in user_msg.lower():
+                        answer = val
+                        found_keyword = True
+                        break
+                if not found_keyword:
+                    answer = "🤖 I can answer questions about watering, sunlight, fertilizer, or the last detected disease. For more advanced questions, please provide an OpenAI API key."
 
         # Save to history
         st.session_state.chat_history.append((user_msg, answer))
