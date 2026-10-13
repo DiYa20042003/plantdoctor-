@@ -1,0 +1,6 @@
+streamlit>=1.30.0
+numpy>=1.23.0
+Pillow>=9.5.0
+pytest>=7.4.0
+# Machine learning framework (install via pip install tensorflow or tensorflow-cpu)
+tensorflow>=2.13.0
